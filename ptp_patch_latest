@@ -1,0 +1,562 @@
+diff --git a/src/vvdn_tsu.c b/src/vvdn_tsu.c
+new file mode 100644
+index 0000000..3730309
+--- /dev/null
++++ b/src/vvdn_tsu.c
+@@ -0,0 +1,131 @@
++#include "vvdn_tsu.h"
++
++int update_tod(void)
++{
++        int ret = -1, fd = 0;
++        volatile void *tod;
++        struct timespec tp;
++        int page_addr, page_offset;
++
++        fd = open("/dev/mem", O_RDWR);
++        if (fd < 1) {
++                printf(" /dev/mem not found \n");
++                return -1;
++        }
++
++        page_addr = (ToD_REG & ~(PAGE_SIZE - 1));
++
++        tod = mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, page_addr);
++        if ((int)tod == -1) {
++                printf(" /dev/mem not found \n");
++                return -1;
++        }
++
++        page_offset = ToD_REG - page_addr;
++
++        tod += page_offset;
++
++        ret = clock_gettime(CLOCK_REALTIME, &tp);
++        if (ret < 0) {
++                printf("failed to get clock_gettime\n");
++                return -1;
++        }
++
++        printf(" System Time ToD Seconds = %lx\n", tp.tv_sec);
++
++        *((unsigned *)(tod + ToD_S_LO_OFF)) = tp.tv_sec;
++        *((unsigned *)(tod + ToD_S_HI_OFF)) = tp.tv_sec;
++
++        printf(" ToD \n -----\n");
++
++        printf(" ToD Seconds_LO = %lx\n", *((long *)(tod + ToD_S_LO_OFF)));
++        printf(" ToD Seconds_HI = %lx\n", *((long *)(tod + ToD_S_HI_OFF)));
++
++	close(fd);
++
++        return 0;
++}
++
++int getTimestampFromFPGA(unsigned int mode, TimeInternal *tim)
++{
++        int ret = -1, fd = 0;
++        volatile void *ts;
++        int page_addr, page_offset;
++
++        fd = open("/dev/mem", O_RDWR);
++        if (fd < 1) {
++                printf(" /dev/mem not found \n");
++                return -1;
++        }
++
++        if (mode == MODE_TX)
++                page_addr = (DELAY_REQ_TX_TS_ADDR & ~(PAGE_SIZE - 1));
++        else
++                page_addr = (SYNC_RX_TS_ADDR & ~(PAGE_SIZE - 1));
++
++        ts = mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, page_addr);
++        if ((int)ts == -1) {
++                printf(" /dev/mem not found \n");
++                return -1;
++        }
++
++        if (mode == MODE_TX)
++                page_offset = DELAY_REQ_TX_TS_ADDR - page_addr;
++        else
++                page_offset = SYNC_RX_TS_ADDR - page_addr;
++
++        ts += page_offset;
++
++
++        tim->nanoseconds = *((unsigned *)(ts + NSEC));
++        tim->seconds = *((unsigned *)(ts + SEC_LO));
++
++        printf("%s : sec_lo = %lx sec_hi = %lx nsec = %lx\n", __func__, tim->seconds, *((unsigned *)(ts + SEC_HI)), tim->nanoseconds);
++	
++	close(fd);
++
++        return 0;
++}
++
++void adjust_mean_pathdelay(PtpClock *ptpClock)
++{
++	int ret = -1, fd = 0;
++        volatile void *adj;
++        int page_addr, page_offset;
++	long int crct_time;
++
++
++        fd = open("/dev/mem", O_RDWR);
++        if (fd < 1) {
++                printf(" /dev/mem not found \n");
++                return -1;
++        }
++	//crct_time = ((ptpClock->delay_req_receive_time.nanoseconds)-(ptpClock->delay_req_send_time.nanoseconds)-(ptpClock->currentDS.meanPathDelay.nanoseconds));
++	crct_time = ((ptpClock->delaySM.nanoseconds)-(ptpClock->currentDS.meanPathDelay.nanoseconds));
++	//printf("----------Crct Time:%lld\n", ((ptpClock->delay_req_receive_time.nanoseconds)-(ptpClock->delay_req_send_time.nanoseconds)-(ptpClock->currentDS.meanPathDelay.nanoseconds)));
++	//printf("----------Crct Time:%llx\n", ((ptpClock->delay_req_receive_time.nanoseconds)-(ptpClock->delay_req_send_time.nanoseconds)-(ptpClock->currentDS.meanPathDelay.nanoseconds)));
++	printf("------Correction: %llx      %lld\n",crct_time,crct_time);
++	
++        page_addr = (MEAN_PATH_DELAY_ADJ & ~(PAGE_SIZE - 1));
++
++        adj = mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, page_addr);
++        if ((int)adj == -1) {
++                printf(" /dev/mem not found \n");
++                return -1;
++        }
++
++        page_offset = MEAN_PATH_DELAY_ADJ - page_addr;
++
++        adj += page_offset;
++
++	if (crct_time < 0) {
++		crct_time = ((-1)*crct_time);
++                printf("Positive Value: %ld\n",crct_time);
++                *((unsigned *)adj) = crct_time;
++                *((unsigned *)adj) = (*((unsigned *)adj) | 0x80000000);
++	}
++	else
++		*((unsigned *)adj) = crct_time;
++
++} 
++ 
+diff --git a/src/vvdn_tsu.h b/src/vvdn_tsu.h
+new file mode 100644
+index 0000000..f305ad4
+--- /dev/null
++++ b/src/vvdn_tsu.h
+@@ -0,0 +1,28 @@
++#ifndef VVDN_PTPD
++#define VVDN_PTPD
++
++#include "ptpd.h"
++
++#define ToD_REG 0x80300000
++#define ToD_NS_OFF 0
++#define ToD_S_LO_OFF 4
++#define ToD_S_HI_OFF 8
++
++#define DELAY_REQ_TX_TS_ADDR 0x80300000
++#define SEC_LO 0x0
++#define SEC_HI 0x4
++#define NSEC 0x8
++#define TAG 0xc
++
++#define SYNC_RX_TS_ADDR 0x80300400
++
++#define PAGE_SIZE 4096
++
++#define MODE_TX 0
++#define MODE_RX 1
++
++#define MEAN_PATH_DELAY_ADJ 0x80300800
++
++#define VVDN
++#define RUNTIME_DEBUG
++#endif
+diff --git a/src/Makefile.am b/src/Makefile.am
+index e297000..fa874b7 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -65,6 +65,8 @@ ptpd2_SOURCES =				\
+ 	dep/alarms.c			\
+ 	ptpd.c				\
+ 	ptpd.h				\
++	vvdn_tsu.h				\
++	vvdn_tsu.c				\
+ 	$(NULL)
+ 
+ # SNMP
+diff --git a/src/arith.c b/src/arith.c
+index 4c13d61..517c3e9 100644
+--- a/src/arith.c
++++ b/src/arith.c
+@@ -167,7 +167,7 @@ normalizeTime(TimeInternal * r)
+ 
+ void
+ addTime(TimeInternal * r, const TimeInternal * x, const TimeInternal * y)
+-{
++{	
+ 	r->seconds = x->seconds + y->seconds;
+ 	r->nanoseconds = x->nanoseconds + y->nanoseconds;
+ 
+diff --git a/src/dep/msg.c b/src/dep/msg.c
+index 346fb82..0d6b667 100644
+--- a/src/dep/msg.c
++++ b/src/dep/msg.c
+@@ -1982,6 +1982,9 @@ msgPackDelayResp(Octet * buf, MsgHeader * header, Timestamp * receiveTimestamp,
+ 		flip16(receiveTimestamp->secondsField.msb);
+ 	*(UInteger32 *) (buf + 36) = flip32(receiveTimestamp->secondsField.lsb);
+ 	*(UInteger32 *) (buf + 40) = flip32(receiveTimestamp->nanosecondsField);
++#ifdef VVDN
++	memcpy(buf + 34, header + 34, 10);
++#endif
+ 	copyClockIdentity((buf + 44), header->sourcePortIdentity.clockIdentity);
+ 	*(UInteger16 *) (buf + 52) =
+ 		flip16(header->sourcePortIdentity.portNumber);
+diff --git a/src/dep/net.c b/src/dep/net.c
+index 7e18572..25d9c98 100644
+--- a/src/dep/net.c
++++ b/src/dep/net.c
+@@ -1677,11 +1677,22 @@ netRecvEvent(Octet * buf, TimeInternal * time, NetPath * netPath, int flags)
+ 					     time->seconds, time->nanoseconds);
+ 				}
+ #endif
++#ifdef VVDN
++				/* get timestamp for SYNC RX */
++				if ((*buf & 0xf) == 0) {
++					printf("VVDN : Got a SYNC packet\n");
++					usleep(10);
++					ret = getTimestampFromFPGA(MODE_RX, time);
++					if (ret != 0) {
++						printf("Failed to get timestamp\n");
++					}
++				}
++#endif
++
+ 			 }
+ 
+ 		}
+ 
+-
+ 		if (!timestampValid) {
+ 			/*
+ 			 * do not try to get by with recording the time here, better
+@@ -1988,6 +1999,18 @@ netSendEvent(Octet * buf, UInteger16 length, NetPath * netPath,
+ 				netPath->sentPackets++;
+ 				netPath->sentPacketsTotal++;
+ 			}
++#ifdef VVDN
++			/* get timestamp for delay_req */
++			if ((*buf & 0xf) == 1) {
++				printf("VVDN : Got a Delay request packet\n");
++				usleep(10);
++				ret = getTimestampFromFPGA(MODE_TX, tim);
++				if (ret != 0) {
++					printf("Failed to get timestamp\n");
++				}
++			}
++#endif
++	
+ #ifdef SO_TIMESTAMPING
+ 
+ #ifdef PTPD_PCAP
+diff --git a/src/dep/servo.c b/src/dep/servo.c
+index f348763..97faff3 100644
+--- a/src/dep/servo.c
++++ b/src/dep/servo.c
+@@ -269,6 +269,11 @@ updateDelay(one_way_delay_filter * mpd_filt, const RunTimeOpts * rtOpts, PtpCloc
+ 		addTime(&ptpClock->currentDS.meanPathDelay, &ptpClock->delaySM,
+ 			&ptpClock->delayMS);
+ 
++		printf(" t3 = %ld   %ld t4 = %ld   %d\n",  ptpClock->delay_req_send_time.seconds, ptpClock->delay_req_send_time.nanoseconds, ptpClock->delay_req_receive_time.seconds, ptpClock->delay_req_receive_time.nanoseconds);
++
++
++		printf ("-------SM nanoseconds: %lx   %d\n", ptpClock->delaySM.nanoseconds, ptpClock->delaySM.nanoseconds);
++		printf ("-------MS nanoseconds: %lx   %d\n", ptpClock->delayMS.nanoseconds, ptpClock->delayMS.nanoseconds);
+ 		/* Subtract correctionField */
+ 		subTime(&ptpClock->currentDS.meanPathDelay, &ptpClock->currentDS.meanPathDelay,
+ 			correctionField);
+@@ -287,7 +292,7 @@ updateDelay(one_way_delay_filter * mpd_filt, const RunTimeOpts * rtOpts, PtpCloc
+ 			goto finish;
+ 		}
+ 
+-		if(ptpClock->currentDS.meanPathDelay.nanoseconds < 0){
++		if(ptpClock->currentDS.meanPathDelay.nanoseconds < 0) {
+ 			DBG("update delay: found negative value for OWD, "
+ 			    "so ignoring this value: %d\n",
+ 				ptpClock->currentDS.meanPathDelay.nanoseconds);
+@@ -296,6 +301,18 @@ updateDelay(one_way_delay_filter * mpd_filt, const RunTimeOpts * rtOpts, PtpCloc
+ 			goto finish;
+ 		}
+ 
++		printf(" ---------- MEAN PATH DELAY : %lld\n", ptpClock->currentDS.meanPathDelay.nanoseconds);
++
++		//printf("----------Crct Time:%lld\n", ((ptpClock->delay_req_receive_time.nanoseconds)-(ptpClock->delay_req_send_time.nanoseconds)-(ptpClock->currentDS.meanPathDelay.nanoseconds)));
++#ifdef VVDN
++		int ret = 0;
++		ret = adjust_mean_pathdelay(ptpClock);
++		if (ret < 0) {
++			printf("Failed to set the Delay value");
++		}
++	
++
++#endif
+ 		/* avoid overflowing filter */
+ 		s = rtOpts->s;
+ 		while (abs(mpd_filt->y) >> (31 - s))
+@@ -535,6 +552,8 @@ updateOffset(TimeInternal * send_time, TimeInternal * recv_time,
+ 
+ 	/* raw value before filtering */
+ 	subTime(&ptpClock->rawDelayMS, recv_time, send_time);
++	printf("-------t1 = %ld   %ld t2 = %ld   %ld", send_time->seconds, send_time->nanoseconds, recv_time->seconds, recv_time->nanoseconds);
++
+ 
+ DBG("UpdateOffset: max delay hit: %d\n", maxDelayHit);
+ 
+@@ -576,6 +595,7 @@ DBG("UpdateOffset: max delay hit: %d\n", maxDelayHit);
+ #else
+ 	/* Used just for End to End mode. */
+ 	subTime(&ptpClock->delayMS, recv_time, send_time);
++	printf(" t1 = %ld t2 = %ld\n", send_time, recv_time);
+ #endif
+ 
+ 	/* Take care of correctionField */
+@@ -835,6 +855,7 @@ void checkOffset(const RunTimeOpts *rtOpts, PtpClock *ptpClock)
+ 	if(!ptpClock->pastStartup && (
+ 	    rtOpts->stepForce || (rtOpts->stepOnce && ptpClock->currentDS.offsetFromMaster.seconds)
+ 	    )) {
++		printf(" VVDN : %s : %d: %d : Hey updating over here\n", __FILE__, __func__, __LINE__);
+ 	    if(rtOpts->stepForce) WARNING("First clock update - will step the clock\n");
+ 	    if(rtOpts->stepOnce) WARNING("First clock update and offset >= 1 second - will step the clock\n");
+ 	    ptpClock->clockControl.stepRequired = TRUE;
+@@ -855,7 +876,7 @@ void checkOffset(const RunTimeOpts *rtOpts, PtpClock *ptpClock)
+ 
+ 	/* offset above 1 second */
+ 	if (ptpClock->currentDS.offsetFromMaster.seconds) {
+-
++		printf(" VVDN : %s : %d: %d : Hey updating over here\n", __FILE__, __func__, __LINE__);
+ 		if(!rtOpts->enablePanicMode) {
+ 			if (!rtOpts->noResetClock)
+ 				CRITICAL("Offset above 1 second (%.09f s). Clock will step.\n", 
+@@ -891,6 +912,7 @@ void checkOffset(const RunTimeOpts *rtOpts, PtpClock *ptpClock)
+ 			ptpClock->panicOver = FALSE;
+ 			timerStop(&ptpClock->timers[PANIC_MODE_TIMER]);
+ 			ptpClock->clockControl.available = TRUE;
++		printf(" VVDN : %s : %d: %d : Hey updating over here\n", __FILE__, __func__, __LINE__);
+ 			ptpClock->clockControl.stepRequired = TRUE;
+ 			ptpClock->clockControl.updateOK = TRUE;
+ 			ptpClock->pastStartup = TRUE;
+diff --git a/src/dep/sys.c b/src/dep/sys.c
+index 31553b8..527345f 100644
+--- a/src/dep/sys.c
++++ b/src/dep/sys.c
+@@ -1545,6 +1545,16 @@ getTimeMonotonic(TimeInternal * time)
+ void
+ setTime(TimeInternal * time)
+ {
++	int ret;
++
++#ifdef VVDN
++	printf(" --------------setTime --------------------\n");
++	ret = update_tod(time->seconds, time->nanoseconds);
++        if (ret != 0) {
++                printf(" Update ToD failed\n");
++        }
++#endif
++
+ 
+ #if defined(_POSIX_TIMERS) && (_POSIX_TIMERS > 0)
+ 
+diff --git a/src/protocol.c b/src/protocol.c
+index 1514add..233ba96 100644
+--- a/src/protocol.c
++++ b/src/protocol.c
+@@ -3131,7 +3131,7 @@ issueDelayReq(const RunTimeOpts *rtOpts,PtpClock *ptpClock)
+ 		}
+         }
+ 
+-	if (!netSendEvent(ptpClock->msgObuf,DELAY_REQ_LENGTH,
++	if (!netSendEvent(ptpClock->msgObuf, DELAY_REQ_LENGTH,
+ 			  &ptpClock->netPath, rtOpts, dst, &internalTime)) {
+ 		toState(PTP_FAULTY,rtOpts,ptpClock);
+ 		ptpClock->counters.messageSendErrors++;
+diff --git a/src/ptpd.c b/src/ptpd.c
+index 3462dd2..1fa92d6 100644
+--- a/src/ptpd.c
++++ b/src/ptpd.c
+@@ -80,6 +80,23 @@ main(int argc, char **argv)
+ 	PtpClock *ptpClock;
+ 	Integer16 ret;
+ 	TimingService *ts;
++	struct timespec tp;
++
++#ifdef VVDN
++	
++	ret = clock_gettime(CLOCK_REALTIME, &tp);
++	if (ret < 0) {
++		printf("failed to get clock_gettime\n");
++		return -1;
++	}
++
++	printf("e--------------setTime --------------------\n");
++	ret = update_tod(tp.tv_sec, tp.tv_nsec);
++	if (ret != 0) {
++		printf(" Update ToD failed\n");
++	}
++#endif
++
+ 
+ 	startupInProgress = TRUE;
+ 
+diff --git a/src/ptpd.h b/src/ptpd.h
+index c5287cf..44e33e8 100644
+--- a/src/ptpd.h
++++ b/src/ptpd.h
+@@ -69,6 +69,7 @@
+ #include <stdarg.h>
+ #include <syslog.h>
+ #include <limits.h>
++#include <sys/mman.h>
+ #ifdef HAVE_GETOPT_H
+ #include <getopt.h>
+ #endif /* HAVE_GETOPT_H */
+@@ -159,6 +160,7 @@
+ #include "dep/ntpengine/ntp_isc_md5.h"
+ 
+ #include "timingdomain.h"
++#include "vvdn_tsu.h"
+ 
+ #ifdef PTPD_STATISTICS
+ #include "dep/outlierfilter.h"
+diff --git a/src/vvdn_tsu.c b/src/vvdn_tsu.c
+index 3730309..7de71c3 100644
+--- a/src/vvdn_tsu.c
++++ b/src/vvdn_tsu.c
+@@ -1,6 +1,6 @@
+ #include "vvdn_tsu.h"
+ 
+-int update_tod(void)
++int update_tod(unsigned int sec, unsigned int nano_sec)
+ {
+         int ret = -1, fd = 0;
+         volatile void *tod;
+@@ -25,19 +25,17 @@ int update_tod(void)
+ 
+         tod += page_offset;
+ 
+-        ret = clock_gettime(CLOCK_REALTIME, &tp);
+-        if (ret < 0) {
+-                printf("failed to get clock_gettime\n");
+-                return -1;
+-        }
+-
+-        printf(" System Time ToD Seconds = %lx\n", tp.tv_sec);
++        printf(" %s : ToD Seconds = %ld Nanoseconds = %ld\n", __func__, sec, nano_sec);
+ 
+-        *((unsigned *)(tod + ToD_S_LO_OFF)) = tp.tv_sec;
+-        *((unsigned *)(tod + ToD_S_HI_OFF)) = tp.tv_sec;
++        *((unsigned *)(tod + ToD_S_LO_OFF)) = sec;
++        *((unsigned *)(tod + ToD_S_HI_OFF)) = nano_sec;
++        *((unsigned *)(tod + ToD_EN)) = (*((unsigned *)(tod + ToD_EN)) | 0x1);
++	usleep(1);
++        *((unsigned *)(tod + ToD_EN)) = (*((unsigned *)(tod + ToD_EN)) & 0x0);
+ 
+         printf(" ToD \n -----\n");
+-
++	
++        printf(" ToD Seconds_LO = %lx\n", *((long *)(tod + ToD_VER)));
+         printf(" ToD Seconds_LO = %lx\n", *((long *)(tod + ToD_S_LO_OFF)));
+         printf(" ToD Seconds_HI = %lx\n", *((long *)(tod + ToD_S_HI_OFF)));
+ 
+@@ -77,6 +75,8 @@ int getTimestampFromFPGA(unsigned int mode, TimeInternal *tim)
+         ts += page_offset;
+ 
+ 
++	printf(" %s : version = %x\n", *((unsigned *)(ts + VERSION)));
++
+         tim->nanoseconds = *((unsigned *)(ts + NSEC));
+         tim->seconds = *((unsigned *)(ts + SEC_LO));
+ 
+@@ -100,13 +100,11 @@ void adjust_mean_pathdelay(PtpClock *ptpClock)
+                 printf(" /dev/mem not found \n");
+                 return -1;
+         }
+-	//crct_time = ((ptpClock->delay_req_receive_time.nanoseconds)-(ptpClock->delay_req_send_time.nanoseconds)-(ptpClock->currentDS.meanPathDelay.nanoseconds));
++
+ 	crct_time = ((ptpClock->delaySM.nanoseconds)-(ptpClock->currentDS.meanPathDelay.nanoseconds));
+-	//printf("----------Crct Time:%lld\n", ((ptpClock->delay_req_receive_time.nanoseconds)-(ptpClock->delay_req_send_time.nanoseconds)-(ptpClock->currentDS.meanPathDelay.nanoseconds)));
+-	//printf("----------Crct Time:%llx\n", ((ptpClock->delay_req_receive_time.nanoseconds)-(ptpClock->delay_req_send_time.nanoseconds)-(ptpClock->currentDS.meanPathDelay.nanoseconds)));
+-	printf("------Correction: %llx      %lld\n",crct_time,crct_time);
++	printf("------Correction: %llx      %lld\n", crct_time, crct_time);
+ 	
+-        page_addr = (MEAN_PATH_DELAY_ADJ & ~(PAGE_SIZE - 1));
++        page_addr = (PTP_DELAY_ADJ & ~(PAGE_SIZE - 1));
+ 
+         adj = mmap(NULL, PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, page_addr);
+         if ((int)adj == -1) {
+@@ -114,18 +112,17 @@ void adjust_mean_pathdelay(PtpClock *ptpClock)
+                 return -1;
+         }
+ 
+-        page_offset = MEAN_PATH_DELAY_ADJ - page_addr;
++        page_offset = PTP_DELAY_ADJ - page_addr;
+ 
+         adj += page_offset;
+ 
+ 	if (crct_time < 0) {
+-		crct_time = ((-1)*crct_time);
+-                printf("Positive Value: %ld\n",crct_time);
+-                *((unsigned *)adj) = crct_time;
+-                *((unsigned *)adj) = (*((unsigned *)adj) | 0x80000000);
+-	}
+-	else
++		crct_time *= -1;
++                printf("Positive Value: %ld\n", crct_time);
++                *((unsigned *)adj) = crct_time | 0x80000000;
++	} else {
+ 		*((unsigned *)adj) = crct_time;
++	}
+ 
+ } 
+  
+diff --git a/src/vvdn_tsu.h b/src/vvdn_tsu.h
+index f305ad4..8a4eabe 100644
+--- a/src/vvdn_tsu.h
++++ b/src/vvdn_tsu.h
+@@ -3,25 +3,29 @@
+ 
+ #include "ptpd.h"
+ 
+-#define ToD_REG 0x80300000
+-#define ToD_NS_OFF 0
+-#define ToD_S_LO_OFF 4
+-#define ToD_S_HI_OFF 8
++#define ToD_REG 0x80060000
++#define ToD_VER 0
++#define ToD_S_LO_OFF 0x4
++#define ToD_S_HI_OFF 0x8
++#define ToD_EN 0xC
+ 
+-#define DELAY_REQ_TX_TS_ADDR 0x80300000
+-#define SEC_LO 0x0
+-#define SEC_HI 0x4
+-#define NSEC 0x8
+-#define TAG 0xc
++#define DELAY_REQ_TX_TS_ADDR 0x80020000
++#define SYNC_RX_TS_ADDR 0x80030000
++
++#define PTP_DELAY_ADJ 0x80060018
++
++#define VERSION 0x0
++#define SEC_LO 0x4
++#define SEC_HI 0x8
++#define NSEC 0xc
++#define TAG 0x10
+ 
+-#define SYNC_RX_TS_ADDR 0x80300400
+ 
+ #define PAGE_SIZE 4096
+ 
+ #define MODE_TX 0
+ #define MODE_RX 1
+ 
+-#define MEAN_PATH_DELAY_ADJ 0x80300800
+ 
+ #define VVDN
+ #define RUNTIME_DEBUG
